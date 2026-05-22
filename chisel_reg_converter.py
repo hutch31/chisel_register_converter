@@ -41,23 +41,20 @@ This generates:
 Generate bundle/register assignments for a single bundle.
 
 Required inputs:
-- --file: Chisel source file containing the bundle.
 - --bundle: Bundle name.
+- --mapping-input: Mapping JSON produced by --rdl.
 - --output: Output binding text file.
 - One direction flag:
     - --config: bundle.field := REG_field
     - --status: REG_field := bundle.field
 
 Optional:
-- --mapping-input: Mapping JSON produced by --rdl. If omitted, mapping is
-    derived from the Chisel bundle directly using the same packing logic.
 - --bundle-ref: Name used on the bundle side in generated lines (default:
     bundle).
 
 Config example:
         python3 chisel_reg_converter.py \
             --binding \
-            --file sample.scala \
             --bundle tSAMPLE_CORE_CONFIG \
             --config \
             --mapping-input regs.mapping.json \
@@ -66,9 +63,9 @@ Config example:
 Status example:
         python3 chisel_reg_converter.py \
             --binding \
-            --file sample.scala \
             --bundle tSAMPLE_CORE_CONFIG \
             --status \
+            --mapping-input regs.mapping.json \
             --output status.bindings.txt
 
 Notes
@@ -311,17 +308,6 @@ def load_bundle_bindings_from_mapping(mapping_file, bundle_name):
     return bundles[bundle_name]
 
 
-def build_bundle_bindings_from_chisel(chisel_file, bundle_name):
-    bundles = parse_chisel_files([chisel_file], [bundle_name])
-    fields = bundles.get(bundle_name, [])
-    if not fields:
-        print(f"Error: No valid fields found for bundle '{bundle_name}' in file '{chisel_file}'.")
-        sys.exit(1)
-
-    _, bindings = build_bundle_layout(bundle_name, fields)
-    return bindings
-
-
 def format_bundle_expr(bundle_ref, binding):
     field_name = binding['bundle_field']
     msb = binding.get('bundle_msb')
@@ -364,9 +350,8 @@ def main():
     parser.add_argument('--mapping-output', help="Optional mapping JSON output path in --rdl mode")
 
     # Binding mode inputs
-    parser.add_argument('--file', help="Chisel (.scala) file containing the target bundle in --binding mode")
     parser.add_argument('--bundle', help="Bundle name to bind in --binding mode")
-    parser.add_argument('--mapping-input', help="Optional mapping JSON input path in --binding mode")
+    parser.add_argument('--mapping-input', help="Mapping JSON input path in --binding mode")
     parser.add_argument('--bundle-ref', default='bundle', help="Reference name used in generated binding lines (default: bundle)")
 
     bind_type_group = parser.add_mutually_exclusive_group()
@@ -390,19 +375,15 @@ def main():
         return
 
     if args.binding:
-        if not args.file or not args.bundle:
-            print("Error: --binding mode requires --file and --bundle.")
+        if not args.bundle or not args.mapping_input:
+            print("Error: --binding mode requires --bundle and --mapping-input.")
             sys.exit(1)
         if not args.config and not args.status:
             print("Error: --binding mode requires one of --config or --status.")
             sys.exit(1)
 
-        if args.mapping_input:
-            print(f"Loading bindings from mapping file: {args.mapping_input}")
-            bindings = load_bundle_bindings_from_mapping(args.mapping_input, args.bundle)
-        else:
-            print("No mapping file provided. Deriving bindings from Chisel bundle layout...")
-            bindings = build_bundle_bindings_from_chisel(args.file, args.bundle)
+        print(f"Loading bindings from mapping file: {args.mapping_input}")
+        bindings = load_bundle_bindings_from_mapping(args.mapping_input, args.bundle)
 
         generate_binding_file(bindings, args.bundle_ref, args.config, args.output)
         return

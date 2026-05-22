@@ -36,3 +36,13 @@ class tSAMPLE_SECURITY_KEY extends Bundle {
   val key_revocation= Bool()
   val privilege_lvl = UInt(2.W)
 }
+
+class COMBINED_CONFIG extends Bundle {
+  val sample_core_config = new tSAMPLE_CORE_CONFIG
+  val sample_security_key = new tSAMPLE_SECURITY_KEY
+}
+
+class COMBINED_STATUS extends Bundle {
+  val sample_metrics = new tSAMPLE_METRICS
+  val sample_tx_data = new tSAMPLE_TX_DATA
+}
