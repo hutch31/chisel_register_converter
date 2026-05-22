@@ -82,17 +82,41 @@ import sys
 import os
 
 
-def parse_chisel_files(file_paths, target_bundles):
+def unwrap_chisel_wrappers(expr):
     """
-    Parses Chisel files to extract fields and their widths for the target bundles.
+    Remove common Chisel directional wrappers like Input(...), Output(...), Flipped(...).
     """
-    bundles = {name: [] for name in target_bundles}
+    wrapped_pattern = re.compile(r'^\s*(Input|Output|Flipped)\s*\((.*)\)\s*$')
+    unwrapped = expr.strip()
 
-    # Regex to extract fields like: val name = Input(UInt(8.W)) or val name = Bool()
-    # Matches: val <name> = <optional_io>( <type>(<optional_width>) )
-    field_pattern = re.compile(
-        r'val\s+(?P<name>\w+)\s*=\s*(?:(?:Input|Output|Flipped)\s*\()?.*?(?P<type>UInt|SInt|Bool)\s*\((?:\s*(?P<width>\d+)\s*\.\s*W\s*)?\)'
-    )
+    while True:
+        match = wrapped_pattern.match(unwrapped)
+        if not match:
+            break
+        unwrapped = match.group(2).strip()
+
+    return unwrapped
+
+
+def parse_bundle_class_definitions(file_paths):
+    """
+    Parse all classes that extend Bundle and extract direct field definitions.
+
+    Returns:
+        dict[str, list[dict]]: {
+            BundleName: [
+                {'kind': 'primitive', 'name': <field>, 'width': <int>},
+                {'kind': 'bundle', 'name': <field>, 'bundle_type': <BundleName>}
+            ]
+        }
+    """
+    bundle_defs = {}
+    class_header_pattern = re.compile(r'^\s*class\s+(?P<name>\w+)\b.*?extends\s+(?:.*\.)?Bundle\b')
+    field_pattern = re.compile(r'^\s*val\s+(?P<name>\w+)\s*=\s*(?P<expr>.+?)\s*$')
+    static_width_pattern = re.compile(r'^(UInt|SInt)\s*\(\s*(?P<width>\d+)\s*\.\s*W\s*\)\s*$')
+    dynamic_width_pattern = re.compile(r'^(UInt|SInt)\s*\(')
+    bool_pattern = re.compile(r'^Bool\s*\(\s*\)\s*$')
+    bundle_inst_pattern = re.compile(r'^new\s+(?P<type>[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s*(?:\(\s*\))?\s*$')
 
     for file_path in file_paths:
         if not os.path.isfile(file_path):
@@ -100,39 +124,128 @@ def parse_chisel_files(file_paths, target_bundles):
             continue
 
         with open(file_path, 'r') as f:
-            content = f.read()
+            lines = f.readlines()
 
-        # Split by "class " to isolate bundle definitions roughly
-        blocks = content.split("class ")
-        for block in blocks:
-            if not block.strip():
+        in_bundle = False
+        current_bundle_name = None
+        current_bundle_lines = []
+        brace_depth = 0
+
+        for line in lines:
+            if not in_bundle:
+                class_match = class_header_pattern.match(line)
+                if not class_match:
+                    continue
+
+                in_bundle = True
+                current_bundle_name = class_match.group('name')
+                current_bundle_lines = []
+                brace_depth = line.count('{') - line.count('}')
+
+                # Skip classes without an explicit body block.
+                if brace_depth <= 0:
+                    in_bundle = False
+                    current_bundle_name = None
+                    current_bundle_lines = []
+                    brace_depth = 0
                 continue
 
-            lines = block.split('\n')
-            first_line = lines[0]
+            current_bundle_lines.append(line)
+            brace_depth += line.count('{') - line.count('}')
 
-            # Check if this class extends Bundle
-            match = re.match(r'(?P<name>\w+).*?extends\s+(?:.*)?Bundle', first_line)
-            if match:
-                b_name = match.group('name')
-                if b_name in target_bundles:
-                    # Parse fields in this bundle block
-                    for f_match in field_pattern.finditer(block):
-                        f_name = f_match.group('name')
-                        f_type = f_match.group('type')
-                        f_width_str = f_match.group('width')
+            if brace_depth > 0:
+                continue
 
-                        if f_type == 'Bool':
-                            f_width = 1
-                        elif f_width_str:
-                            f_width = int(f_width_str)
-                        else:
-                            # Skip fields with dynamically calculated widths (e.g. .getWidth.W)
-                            print(
-                                f"Warning: Field '{f_name}' in '{b_name}' has a dynamic or unparseable width. Skipping.")
-                            continue
+            fields = []
+            for raw_line in current_bundle_lines:
+                line_wo_comment = raw_line.split('//', 1)[0].strip()
+                if not line_wo_comment:
+                    continue
 
-                        bundles[b_name].append({'name': f_name, 'width': f_width})
+                field_match = field_pattern.match(line_wo_comment)
+                if not field_match:
+                    continue
+
+                f_name = field_match.group('name')
+                expr = unwrap_chisel_wrappers(field_match.group('expr'))
+
+                if bool_pattern.match(expr):
+                    fields.append({'kind': 'primitive', 'name': f_name, 'width': 1})
+                    continue
+
+                width_match = static_width_pattern.match(expr)
+                if width_match:
+                    fields.append({'kind': 'primitive', 'name': f_name, 'width': int(width_match.group('width'))})
+                    continue
+
+                if dynamic_width_pattern.match(expr):
+                    print(
+                        f"Warning: Field '{f_name}' in '{current_bundle_name}' has a dynamic or unparseable width. Skipping.")
+                    continue
+
+                bundle_match = bundle_inst_pattern.match(expr)
+                if bundle_match:
+                    bundle_type = bundle_match.group('type').split('.')[-1]
+                    fields.append({'kind': 'bundle', 'name': f_name, 'bundle_type': bundle_type})
+
+            bundle_defs[current_bundle_name] = fields
+
+            in_bundle = False
+            current_bundle_name = None
+            current_bundle_lines = []
+            brace_depth = 0
+
+    return bundle_defs
+
+
+def flatten_bundle_fields(bundle_name, bundle_defs, path_prefix=None, stack=None):
+    """
+    Recursively flatten a bundle's primitive fields while preserving full hierarchy.
+    """
+    if path_prefix is None:
+        path_prefix = []
+    if stack is None:
+        stack = []
+
+    if bundle_name in stack:
+        cycle_path = " -> ".join(stack + [bundle_name])
+        print(f"Warning: Recursive bundle reference detected ({cycle_path}). Skipping nested expansion.")
+        return []
+
+    if bundle_name not in bundle_defs:
+        print(f"Warning: Bundle type '{bundle_name}' not found. Skipping nested expansion.")
+        return []
+
+    flat_fields = []
+    next_stack = stack + [bundle_name]
+
+    for field in bundle_defs[bundle_name]:
+        current_path = path_prefix + [field['name']]
+
+        if field['kind'] == 'primitive':
+            dotted_path = '.'.join(current_path)
+            flat_fields.append({
+                'name': '_'.join(current_path),
+                'path': dotted_path,
+                'width': field['width']
+            })
+            continue
+
+        nested_bundle_type = field['bundle_type']
+        flat_fields.extend(flatten_bundle_fields(nested_bundle_type, bundle_defs, current_path, next_stack))
+
+    return flat_fields
+
+
+def parse_chisel_files(file_paths, target_bundles):
+    """
+    Parses Chisel files and recursively flattens target bundle fields.
+    """
+    bundles = {}
+    bundle_defs = parse_bundle_class_definitions(file_paths)
+
+    for bundle_name in target_bundles:
+        bundles[bundle_name] = flatten_bundle_fields(bundle_name, bundle_defs)
 
     return bundles
 
@@ -174,6 +287,7 @@ def build_bundle_layout(bundle_name, fields):
     for f in fields:
         w = f['width']
         f_name = f['name']
+        f_path = f.get('path', f_name)
 
         if w <= 32:
             if current_bit + w > 32:
@@ -190,6 +304,7 @@ def build_bundle_layout(bundle_name, fields):
             target_reg_name = f"{bundle_name}_{reg_idx}"
             bindings.append({
                 'bundle_field': f_name,
+                'bundle_path': f_path,
                 'bundle_msb': None,
                 'bundle_lsb': None,
                 'register': target_reg_name,
@@ -219,6 +334,7 @@ def build_bundle_layout(bundle_name, fields):
                 target_reg_name = f"{bundle_name}_{reg_idx}"
                 bindings.append({
                     'bundle_field': f_name,
+                    'bundle_path': f_path,
                     'bundle_msb': msb_in_field,
                     'bundle_lsb': lsb_in_field,
                     'register': target_reg_name,
@@ -309,7 +425,7 @@ def load_bundle_bindings_from_mapping(mapping_file, bundle_name):
 
 
 def format_bundle_expr(bundle_ref, binding):
-    field_name = binding['bundle_field']
+    field_name = binding.get('bundle_path') or binding['bundle_field']
     msb = binding.get('bundle_msb')
     lsb = binding.get('bundle_lsb')
 

@@ -44,8 +44,8 @@ Generate bundle/register assignments for a single bundle.
 
 Required inputs:
 
-- `--file`: Chisel source file containing the bundle.
 - `--bundle`: Bundle name.
+- `--mapping-input`: Mapping JSON produced by `--rdl`.
 - `--output`: Output binding text file.
 - One direction flag:
 	- `--config`: `bundle.field := REG_field`
@@ -53,7 +53,6 @@ Required inputs:
 
 Optional:
 
-- `--mapping-input`: Mapping JSON produced by `--rdl`. If omitted, mapping is derived from the Chisel bundle directly using the same packing logic.
 - `--bundle-ref`: Name used on the bundle side in generated lines (default: `bundle`).
 
 Config example:
@@ -61,7 +60,6 @@ Config example:
 ```bash
 python3 chisel_reg_converter.py \
 	--binding \
-	--file sample.scala \
 	--bundle tSAMPLE_CORE_CONFIG \
 	--config \
 	--mapping-input regs.mapping.json \
@@ -73,9 +71,9 @@ Status example:
 ```bash
 python3 chisel_reg_converter.py \
 	--binding \
-	--file sample.scala \
 	--bundle tSAMPLE_CORE_CONFIG \
 	--status \
+	--mapping-input regs.mapping.json \
 	--output status.bindings.txt
 ```
 
@@ -83,3 +81,5 @@ python3 chisel_reg_converter.py \
 
 - Fields wider than 32 bits are split into 32-bit chunks and bound with bit slices.
 - Dynamic/unparseable widths are skipped with warnings.
+- Hierarchical bundles are supported. Nested bundles are recursively flattened into registers under the selected parent bundle.
+- Mapping entries preserve hierarchy in `bundle_path` (for example: `sample_core_config.core_id`) while register fields remain flat.
