@@ -355,12 +355,15 @@ def generate_rdl(bundles, output_file, mapping_output_file=None):
     Packs the extracted fields into 32-bit registers and writes an RDL file.
     Fields > 32b are split into dedicated, unshared registers.
     """
+    addrmap_name = os.path.splitext(os.path.basename(output_file))[0]
+
     rdl_lines = []
-    rdl_lines.append("addrmap ChiselRegMap {")
-    rdl_lines.append('    name = "Chisel Generated Register Map";')
+    rdl_lines.append(f"addrmap {addrmap_name} {{")
+    rdl_lines.append(f'    name = "{addrmap_name}";')
     rdl_lines.append("    default regwidth = 32;")
     rdl_lines.append("    default sw = rw;")
     rdl_lines.append("    default hw = r;")
+    rdl_lines.append("    default reset = 0;")
     rdl_lines.append("")
 
     offset = 0x0
@@ -370,6 +373,9 @@ def generate_rdl(bundles, output_file, mapping_output_file=None):
         if not fields:
             print(f"Warning: No valid fields found for bundle '{b_name}'.")
             continue
+
+        is_status = 'status' in b_name.lower()
+        field_props = "{ hw = w; sw = r; }" if is_status else "{}"
 
         registers, bindings = build_bundle_layout(b_name, fields)
         mapping['bundles'][b_name] = bindings
@@ -383,10 +389,7 @@ def generate_rdl(bundles, output_file, mapping_output_file=None):
                 f_name = f['name']
                 lsb = f['lsb']
                 msb = f['msb']
-                if lsb == msb:
-                    rdl_lines.append(f"        field {{}} {f_name}[{lsb}];")
-                else:
-                    rdl_lines.append(f"        field {{}} {f_name}[{msb}:{lsb}];")
+                rdl_lines.append(f"        field {field_props} {f_name}[{msb}:{lsb}];")
 
             rdl_lines.append("    };")
             rdl_lines.append(f"    {reg_name}_t {reg_name} @ {hex(offset)};")
